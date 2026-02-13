@@ -3,8 +3,6 @@ name = "axon-runtime-common"
 version = "0.1.0"
 edition.workspace = true
 
-license.workspace = true
-
 [features]
 default = []
 user = ["aya"]
