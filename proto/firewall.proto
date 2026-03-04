@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package firewall;
+
+option go_package = "github.com/axon/proto";
+
+// ─────────────────────────────────────────────
+// Firewall Log Message
+// ─────────────────────────────────────────────
+message FirewallLog {
+    string timestamp  = 1;
+    string interface  = 2;
+    string src_ip     = 3;
+    string dst_ip     = 4;
+    string fqdn       = 5;  // FQDN for L7, empty for L3 explicit IP
+    string rule_type  = 6;  // explicit | tentative | shared-l7
+    string action     = 7;  // blocked | allowed
+    uint32 src_port   = 8;
+    uint32 dst_port   = 9;
+    string protocol   = 10; // tcp | udp | icmp
+    string layer      = 11; // L3 | L7
+}
+
+// ─────────────────────────────────────────────
+// CLI ↔ Daemon gRPC Service
+// ─────────────────────────────────────────────
+service FirewallControl {
+    rpc AddRule       (RuleRequest)    returns (RuleResponse);
+    rpc RemoveRule    (RuleRequest)    returns (RuleResponse);
+    rpc ListRules     (ListRequest)    returns (ListResponse);
+    rpc SyncNow       (SyncRequest)    returns (SyncResponse);
+    rpc SetMode       (ModeRequest)    returns (ModeResponse);
+    rpc GetStatus     (StatusRequest)  returns (StatusResponse);
+    rpc SetLogEndpoint(LogEndpointReq) returns (LogEndpointResp);
+    rpc StreamLogs    (LogStreamReq)   returns (stream FirewallLog);
+}
+
+// ─────────────────────────────────────────────
+// Rule Management
+// ─────────────────────────────────────────────
+message RuleRequest {
+    string target    = 1; // IP or FQDN
+    string interface = 2; // "" = all interfaces
+    string rule_type = 3; // "block" | "allow"
+}
+
+message RuleResponse {
+    bool   success = 1;
+    string message = 2;
+}
+
+message ListRequest {
+    string interface = 1; // "" = all
+}
+
+message ListResponse {
+    repeated Rule rules = 1;
+}
+
+message Rule {
+    string target      = 1;
+    string interface   = 2;
+    string rule_type   = 3; // block | allow
+    string entry_type  = 4; // explicit-ip | fqdn | tentative | shared-l7
+    repeated string resolved_ips = 5;
+    int64  ttl_seconds = 6;
+}
+
+// ─────────────────────────────────────────────
+// Sync
+// ─────────────────────────────────────────────
+message SyncRequest {}
+message SyncResponse {
+    bool   success = 1;
+    string message = 2;
+}
+
+// ─────────────────────────────────────────────
+// Mode
+// ─────────────────────────────────────────────
+message ModeRequest {
+    string mode      = 1; // "allow-all" | "block-all"
+    string interface = 2; // "" = global
+}
+
+message ModeResponse {
+    bool   success = 1;
+    string message = 2;
+}
+
+// ─────────────────────────────────────────────
+// Status
+// ─────────────────────────────────────────────
+message StatusRequest {}
+
+message StatusResponse {
+    string daemon_version  = 1;
+    string mode            = 2;
+    int32  total_rules     = 3;
+    repeated InterfaceStatus interfaces = 4;
+    string log_endpoint    = 5;
+}
+
+message InterfaceStatus {
+    string iface           = 1;
+    int32  explicit_ips    = 2;
+    int32  fqdns           = 3;
+    int32  tentative_ips   = 4;
+    int32  shared_fqdns    = 5;
+    bool   xdp_attached    = 6;
+}
+
+// ─────────────────────────────────────────────
+// Log Endpoint Config
+// ─────────────────────────────────────────────
+message LogEndpointReq {
+    string address = 1; // host:port, e.g. "127.0.0.1:5000"
+}
+
+message LogEndpointResp {
+    bool   success = 1;
+    string message = 2;
+}
+
+// ─────────────────────────────────────────────
+// Log Streaming
+// ─────────────────────────────────────────────
+message LogStreamReq {
+    string interface = 1; // "" = all
+    string layer     = 2; // "L3" | "L7" | "" = all
+}

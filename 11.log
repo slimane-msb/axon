@@ -1,0 +1,158 @@
+
+────────────────────────────────────────
+  ENV
+────────────────────────────────────────
+[17:04:22] kernel: 5.15.0-86-generic
+[17:04:22] user: root
+-rwxrwxr-x 1 slim slim 15M Mar  4 17:00 /tmp/axon
+-rwxrwxr-x 1 slim slim 21M Mar  4 17:00 /tmp/axond
+
+────────────────────────────────────────
+  STEP 1 — rebuild both binaries
+────────────────────────────────────────
+  Building axond...
+go: downloading github.com/cilium/ebpf v0.12.3
+go: downloading github.com/florianl/go-nfqueue v1.3.2
+go: downloading github.com/google/gopacket v1.1.19
+go: downloading go.etcd.io/bbolt v1.3.8
+go: downloading github.com/mdlayher/netlink v1.7.2
+go: downloading github.com/josharian/native v1.1.0
+go: downloading github.com/mdlayher/socket v0.5.0
+go: downloading golang.org/x/sync v0.4.0
+go: downloading golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2
+  axond exit: 0
+  Building axon...
+go: downloading github.com/spf13/cobra v1.8.0
+go: downloading github.com/spf13/pflag v1.0.5
+  axon exit: 0
+-rwxr-xr-x 1 root root 15M Mar  4 17:04 /tmp/axon
+-rwxr-xr-x 1 root root 21M Mar  4 17:04 /tmp/axond
+
+────────────────────────────────────────
+  STEP 2 — kill stale + prep
+────────────────────────────────────────
+[17:04:28] dirs ready
+
+────────────────────────────────────────
+  STEP 3 — start daemon on UNIX socket
+────────────────────────────────────────
+[2026-03-04T17:04:28.914+01:00] INFO  [main] Starting axon daemon v1.0.0
+[2026-03-04T17:04:28.914+01:00] INFO  [main] gRPC: unix:///run/axon/daemon.sock | Log server: 127.0.0.1:5000 | BPF: /tmp/xdp_firewall.o
+[2026-03-04T17:04:28.916+01:00] INFO  [daemon] Log endpoint set to: 127.0.0.1:5000
+[2026-03-04T17:04:28.916+01:00] INFO  [daemon] axon daemon v1.0.0 starting...
+[2026-03-04T17:04:28.916+01:00] INFO  [daemon] Cold start: loading rules from storage...
+[2026-03-04T17:04:28.917+01:00] INFO  [daemon] Loaded iface all: 0 explicit, 1 fqdns, 0 tentative
+[2026-03-04T17:04:28.917+01:00] INFO  [l7] L7 engine started on NFQUEUE 1
+[2026-03-04T17:04:28.917+01:00] INFO  [daemon] Daemon started successfully
+[2026-03-04T17:04:28.917+01:00] INFO  [daemon] Ring buffer poller started
+[2026-03-04T17:04:28.918+01:00] INFO  [log-server] Log server listening on 127.0.0.1:5000
+[2026-03-04T17:04:28.918+01:00] INFO  [grpc] gRPC server listening on unix:///run/axon/daemon.sock
+[2026-03-04T17:04:29.423+01:00] WARN  [dns] DNS refresh failed for evil.example.com on all: resolve evil.example.com: lookup evil.example.com on 127.0.0.53:53: no such host
+  daemon alive PID=181380
+
+  CMD: ls -la /run/axon/
+total 0
+drwxr-xr-x  2 root root   60 Mar  4 17:04 .
+drwxr-xr-x 48 root root 1360 Mar  4 14:15 ..
+srwxr-xr-x  1 root root    0 Mar  4 17:04 daemon.sock
+  EXIT: 0
+
+────────────────────────────────────────
+  STEP 4 — CLI status via UNIX socket (the fix under test)
+────────────────────────────────────────
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock status
+
+🔥 axon v1.0.0
+   Mode:         allow-all
+   Total rules:  1
+   Log endpoint: 127.0.0.1:5000
+
+   INTERFACE  EXPLICIT IPs  FQDNs  TENTATIVE  SHARED L7  XDP
+   ─────────  ────────────  ─────  ─────────  ─────────  ───
+   all        0             1      0          0          ✅
+
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock list
+TARGET            INTERFACE  TYPE   ENTRY  RESOLVED IPs
+──────            ─────────  ────   ─────  ────────────
+evil.example.com  all        block  fqdn   -
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock add 1.2.3.4
+[2026-03-04T17:04:30.933+01:00] INFO  [daemon] Added explicit IP 1.2.3.4 on all (block)
+✅ Rule added: 1.2.3.4 on all (block)
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock add google.com
+[2026-03-04T17:04:30.949+01:00] INFO  [daemon] Added FQDN google.com on all (block)
+✅ Rule added: google.com on all (block)
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock list
+TARGET            INTERFACE  TYPE   ENTRY        RESOLVED IPs
+──────            ─────────  ────   ─────        ────────────
+1.2.3.4           all        block  explicit-ip  -
+evil.example.com  all        block  fqdn         -
+google.com        all        block  fqdn         172.217.22.46
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock remove 1.2.3.4
+[2026-03-04T17:04:30.980+01:00] INFO  [daemon] Removed explicit IP 1.2.3.4 from all
+✅ Rule removed: 1.2.3.4 from all
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock list
+TARGET            INTERFACE  TYPE   ENTRY  RESOLVED IPs
+──────            ─────────  ────   ─────  ────────────
+evil.example.com  all        block  fqdn   -
+google.com        all        block  fqdn   172.217.22.46
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock mode allow-all
+[2026-03-04T17:04:31.021+01:00] INFO  [daemon] Mode set to allow-all on 
+✅ Mode set to allow-all on all
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock sync
+[2026-03-04T17:04:31.052+01:00] INFO  [daemon] Manual sync triggered
+[2026-03-04T17:04:31.055+01:00] WARN  [dns] DNS refresh failed for evil.example.com on all: resolve evil.example.com: lookup evil.example.com on 127.0.0.53:53: no such host
+✅ DNS sync triggered
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock log-endpoint 127.0.0.1:5000
+[2026-03-04T17:04:31.078+01:00] INFO  [daemon] Log endpoint set to: 127.0.0.1:5000
+✅ Log endpoint set to 127.0.0.1:5000
+  EXIT: 0
+
+  CMD: sudo /tmp/axon --socket unix:///run/axon/daemon.sock status
+
+🔥 axon v1.0.0
+   Mode:         allow-all
+   Total rules:  2
+   Log endpoint: 127.0.0.1:5000
+
+   INTERFACE  EXPLICIT IPs  FQDNs  TENTATIVE  SHARED L7  XDP
+   ─────────  ────────────  ─────  ─────────  ─────────  ───
+   all        0             2      1          0          ✅
+
+  EXIT: 0
+
+────────────────────────────────────────
+  STEP 5 — log server
+────────────────────────────────────────
+
+  CMD: nc -z 127.0.0.1 5000
+  EXIT: 0
+  (reading log server for 2s...)
+{"server":"axon","version":"1.0.0"}
+
+────────────────────────────────────────
+  CLEANUP
+────────────────────────────────────────
+[2026-03-04T17:04:33.119+01:00] INFO  [main] Received signal terminated, shutting down...
+[2026-03-04T17:04:33.119+01:00] ERROR [l7] NFQUEUE error: netlink receive: use of closed file
+[2026-03-04T17:04:33.119+01:00] INFO  [daemon] Daemon stopped
+[2026-03-04T17:04:33.119+01:00] INFO  [main] Shutdown complete
+done

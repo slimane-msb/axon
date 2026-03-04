@@ -1,0 +1,47 @@
+[Unit]
+Description=axon — Hybrid L3/L7 Per-Interface FQDN Firewall Daemon
+Documentation=https://github.com/axon/axon
+After=network.target network-online.target
+Wants=network-online.target
+After=sys-fs-bpf.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/axond \
+    --grpc unix:///run/axon/daemon.sock \
+    --log-addr 127.0.0.1:5000 \
+    --bpf /usr/lib/axon/xdp_firewall.o \
+    --db /var/lib/axon/db.bolt \
+    --dns-interval 30s
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Security
+User=root
+Group=root
+
+# Runtime directory
+RuntimeDirectory=axon
+RuntimeDirectoryMode=0750
+
+# Allow eBPF and network operations
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_BPF
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN CAP_BPF
+NoNewPrivileges=false
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+
+# Output
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=axon
+
+# Environment
+Environment=GOGC=100
+
+[Install]
+WantedBy=multi-user.target

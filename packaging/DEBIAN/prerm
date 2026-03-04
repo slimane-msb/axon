@@ -1,0 +1,26 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|purge|deconfigure)
+        # Stop and disable service
+        systemctl stop axon.service 2>/dev/null || true
+        systemctl disable axon.service 2>/dev/null || true
+
+        # Remove iptables rule
+        iptables -t mangle -D PREROUTING -m mark --mark 0xBEEF -j NFQUEUE --queue-num 1 2>/dev/null || true
+
+        # Detach any pinned XDP links
+        rm -rf /sys/fs/bpf/axon/ 2>/dev/null || true
+
+        echo "axon service stopped and removed."
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

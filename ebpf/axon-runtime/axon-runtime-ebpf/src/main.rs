@@ -1,22 +1,29 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
-use aya_log_ebpf::info;
-
+use aya_ebpf::{
+    bindings::xdp_action,
+    macros::{map, xdp},
+    maps::{HashMap, RingBuf},
+    programs::XdpContext,
+};
 use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
-    ip::{IpProto, Ipv4Hdr},
+    ip::{Ipv4Hdr, IpProto},
     tcp::TcpHdr,
     udp::UdpHdr,
 };
+use axon_runtime_common::{IpKey, DropEvent};
 
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
+#[map]
+static BLOCKED_IP_MAP: HashMap<IpKey, u8> = HashMap::with_max_entries(65536, 0);
+
+#[map]
+static MODE_MAP: HashMap<u32, u8> = HashMap::with_max_entries(64, 0);
+
+#[map]
+static EVENTS: RingBuf = RingBuf::with_byte_size(16777216, 0);
 
 #[xdp]
 pub fn xdp_firewall(ctx: XdpContext) -> u32 {
@@ -26,45 +33,40 @@ pub fn xdp_firewall(ctx: XdpContext) -> u32 {
     }
 }
 
-#[inline(always)] // (1)
-fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
+fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
+    let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
+    if unsafe { (*ethhdr).ether_type } != EtherType::Ipv4 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+    let src_ip = unsafe { (*ipv4hdr).src_addr };
+    let dst_ip = unsafe { (*ipv4hdr).dst_addr };
+    let protocol = unsafe { (*ipv4hdr).proto };
+    let ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+
+    let mode = MODE_MAP.get(&ifindex).copied().unwrap_or(0); 
+    let key = IpKey { ifindex, ip: dst_ip };
+
+    if let Some(_hit) = BLOCKED_IP_MAP.get(&key) {
+        if mode == 0 { 
+            return Ok(xdp_action::XDP_DROP);
+        }
+        return Ok(xdp_action::XDP_PASS); 
+    }
+
+    if mode == 1 {
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    Ok(xdp_action::XDP_PASS)
+}
+
+#[inline(always)]
+unsafe fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = mem::size_of::<T>();
-
-    if start + offset + len > end {
-        return Err(());
-    }
-
+    if start + offset + len > end { return Err(()); }
     Ok((start + offset) as *const T)
-}
-
-fn try_xdp_firewall(ctx: XdpContext) -> Result<u32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?; // (2)
-    match unsafe { (*ethhdr).ether_type() } {
-        Ok(EtherType::Ipv4) => {}
-        _ => return Ok(xdp_action::XDP_PASS),
-    }
-
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
-    let source_addr = u32::from_be_bytes(unsafe { (*ipv4hdr).src_addr });
-
-    let source_port = match unsafe { (*ipv4hdr).proto } {
-        IpProto::Tcp => {
-            let tcphdr: *const TcpHdr =
-                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-            u16::from_be_bytes(unsafe { (*tcphdr).source })
-        }
-        IpProto::Udp => {
-            let udphdr: *const UdpHdr =
-                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-            unsafe { (*udphdr).src_port() }
-        }
-        _ => return Err(()),
-    };
-
-    // (3)
-    info!(&ctx, "SRC IP: {:i}, SRC PORT: {}", source_addr, source_port);
-
-    Ok(xdp_action::XDP_PASS)
 }
