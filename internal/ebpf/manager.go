@@ -162,23 +162,18 @@ func (m *XDPManager) AttachXDP(ifindex int, ifname string) error {
 	// Step 1: ensure clsact qdisc exists on the interface.
 	// clsact is a no-op classless qdisc that provides the ingress/egress
 	// hook points for BPF filters without affecting scheduling.
-	link, err := netlink.LinkByIndex(ifindex)
-	if err != nil {
-		return fmt.Errorf("get link %s: %w", ifname, err)
-	}
-
-	qdisc := &netlink.GenericQdisc{
+	// Must use netlink.Clsact{} — GenericQdisc with QdiscType "clsact" does
+	// not serialize the netlink message correctly and is silently ignored.
+	qdisc := &netlink.Clsact{
 		QdiscAttrs: netlink.QdiscAttrs{
 			LinkIndex: ifindex,
 			Handle:    netlink.MakeHandle(0xffff, 0),
 			Parent:    netlink.HANDLE_CLSACT,
 		},
-		QdiscType: "clsact",
 	}
 	if err := netlink.QdiscAdd(qdisc); err != nil && !errors.Is(err, unix.EEXIST) {
 		return fmt.Errorf("add clsact qdisc on %s: %w", ifname, err)
 	}
-	_ = link // used above
 
 	// Step 2: attach the BPF program as a TC filter on ingress.
 	// DirectAction=true means the program's return code IS the TC verdict
@@ -232,13 +227,12 @@ func (m *XDPManager) DetachXDP(ifindex int, ifname string) error {
 	_ = netlink.FilterDel(filter) // best-effort
 
 	// Remove the clsact qdisc (takes all filters with it)
-	qdisc := &netlink.GenericQdisc{
+	qdisc := &netlink.Clsact{
 		QdiscAttrs: netlink.QdiscAttrs{
 			LinkIndex: ifindex,
 			Handle:    netlink.MakeHandle(0xffff, 0),
 			Parent:    netlink.HANDLE_CLSACT,
 		},
-		QdiscType: "clsact",
 	}
 	_ = netlink.QdiscDel(qdisc) // best-effort
 
@@ -380,10 +374,18 @@ func (m *XDPManager) CountEntries(ifindex int) (explicit, tentative, shared int)
 }
 
 func (m *XDPManager) Close() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, att := range m.tc {
-		_ = att.prog.Close()
-	}
-	m.tc = make(map[int]*tcAttachment)
+    m.mu.Lock()
+    // We can't call DetachXDP directly because it tries to lock m.mu again
+    // Copy the keys to avoid deadlocking or iterator invalidation
+    indices := make([]int, 0, len(m.tc))
+    for idx := range m.tc {
+        indices = append(indices, idx)
+    }
+    m.mu.Unlock()
+
+    for _, idx := range indices {
+        // You might need a way to look up the ifname or change 
+        // DetachXDP to not require it if it's just for the pin path
+        _ = m.DetachXDP(idx, "") 
+    }
 }

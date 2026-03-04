@@ -241,8 +241,11 @@ func (d *Daemon) loadInterfaceFromStore(iface string) error {
 		}
 	}
 
-	// Populate explicit IPs into eBPF
+	// Attach TC hook before populating maps (idempotent)
 	ifindex := ifaceIndex(iface)
+	d.ensureAttached(iface, ifindex)
+
+	// Populate explicit IPs into eBPF
 	if d.xdp != nil && ifindex > 0 {
 		for ipStr := range explicitIPs {
 			ip := net.ParseIP(ipStr)
@@ -302,6 +305,7 @@ func (d *Daemon) addExplicitIP(rules *InterfaceRules, iface string, ip net.IP, r
 	}
 
 	ifindex := ifaceIndex(iface)
+	d.ensureAttached(iface, ifindex)
 	if d.xdp != nil && ifindex > 0 {
 		return d.xdp.AddExplicitIP(ifindex, ip)
 	}
@@ -744,6 +748,18 @@ func (d *Daemon) Hub() *logging.Hub {
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
+
+// ensureAttached ensures the TC BPF hook is installed on the interface.
+// It is idempotent — AttachXDP is a no-op if already attached.
+// Called whenever an interface is first seen (new rule or cold-start load).
+func (d *Daemon) ensureAttached(iface string, ifindex int) {
+	if d.xdp == nil || ifindex <= 0 || iface == "" || iface == "all" {
+		return
+	}
+	if err := d.xdp.AttachXDP(ifindex, iface); err != nil {
+		d.logger.Warnf("TC attach on %s: %v", iface, err)
+	}
+}
 
 func (d *Daemon) getOrCreateIface(iface string) *InterfaceRules {
 	d.mu.Lock()
