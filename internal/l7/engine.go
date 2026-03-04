@@ -26,6 +26,7 @@ const (
 type Engine struct {
 	mu          sync.RWMutex
 	sharedFQDNs map[string]map[string]struct{} // iface → set of FQDNs to block
+	sharedIPs   map[string]struct{}             // IPs that are in shared-L7 mode (any iface)
 	hub         *logging.Hub
 	logger      *logging.Logger
 	nf          *nfqueue.Nfqueue
@@ -36,6 +37,7 @@ type Engine struct {
 func NewEngine(hub *logging.Hub, logger *logging.Logger) *Engine {
 	return &Engine{
 		sharedFQDNs: make(map[string]map[string]struct{}),
+		sharedIPs:   make(map[string]struct{}),
 		hub:         hub,
 		logger:      logger,
 	}
@@ -58,6 +60,21 @@ func (e *Engine) RemoveSharedFQDN(iface, fqdn string) {
 	if s, ok := e.sharedFQDNs[iface]; ok {
 		delete(s, strings.ToLower(fqdn))
 	}
+}
+
+// AddSharedIP registers an IP as being in shared-L7 mode.
+// Packets to this IP with no SNI will be dropped (no domain = can't allow selectively).
+func (e *Engine) AddSharedIP(ip string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sharedIPs[ip] = struct{}{}
+}
+
+// RemoveSharedIP removes an IP from shared-L7 tracking.
+func (e *Engine) RemoveSharedIP(ip string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.sharedIPs, ip)
 }
 
 // GetSharedFQDNs returns current shared FQDNs for status reporting
@@ -158,6 +175,22 @@ func (e *Engine) handlePacket(a nfqueue.Attribute) int {
 	if host != "" {
 		if block, iface := e.shouldBlock(host); block {
 			e.emitLog(packet, host, iface, "blocked")
+			return e.dropPacket(a)
+		}
+		return e.acceptPacket(a)
+	}
+
+	// No application-layer identifier (no SNI, no HTTP Host).
+	// If the destination IP is a known shared-L7 IP, we must drop:
+	// we cannot selectively allow without knowing which domain is intended,
+	// and the IP hosts at least one blocked domain.
+	if ip, ok := packet.NetworkLayer().(*layers.IPv4); ok {
+		dstIP := ip.DstIP.String()
+		e.mu.RLock()
+		_, isShared := e.sharedIPs[dstIP]
+		e.mu.RUnlock()
+		if isShared {
+			e.emitLog(packet, dstIP, "", "blocked")
 			return e.dropPacket(a)
 		}
 	}

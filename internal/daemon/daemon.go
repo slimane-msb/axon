@@ -53,6 +53,10 @@ type Daemon struct {
 	ifaces     map[string]*InterfaceRules // iface → rules
 	globalMode uint8
 
+	// classifyMu serializes classifyAndApply calls per iface so that
+	// concurrent DNS resolutions don't race and mis-classify shared IPs.
+	classifyMu sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -230,6 +234,7 @@ func (d *Daemon) loadInterfaceFromStore(iface string) error {
 				_ = d.xdp.AddSharedIP(ifindex, ip)
 			}
 			d.l7Engine.AddSharedFQDN(iface, entry.FQDN)
+			d.l7Engine.AddSharedIP(ipStr)
 		} else {
 			rules.TentativeIPs[ipStr] = TentativeEntry{
 				FQDN:     entry.FQDN,
@@ -330,19 +335,19 @@ func (d *Daemon) addFQDN(rules *InterfaceRules, iface, fqdn, ruleType string) er
 
 	d.dnsLoop.AddFQDN(iface, fqdn)
 
-	// Resolve immediately
-	go func() {
-		ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
-		defer cancel()
+	// Resolve synchronously so that classification is correct before AddRule returns.
+	// This ensures the caller (gRPC handler / test script) sees a fully-applied rule
+	// immediately after the add command completes.
+	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Second)
+	defer cancel()
 
-		ips, ttl, err := d.dnsRes.ResolveFQDN(ctx, fqdn)
-		if err != nil {
-			d.logger.Warnf("Initial resolve for %s failed: %v", fqdn, err)
-			return
-		}
+	ips, ttl, err := d.dnsRes.ResolveFQDN(ctx, fqdn)
+	if err != nil {
+		d.logger.Warnf("Initial resolve for %s failed: %v", fqdn, err)
+	} else {
 		d.dnsRes.UpdateCache(fqdn, ips, ttl)
 		d.classifyAndApply(iface, fqdn, nil, ips)
-	}()
+	}
 
 	d.logger.Infof("Added FQDN %s on %s (%s)", fqdn, iface, ruleType)
 	return nil
@@ -464,6 +469,11 @@ func (d *Daemon) onDNSChange(ev dns.ChangeEvent) {
 
 // classifyAndApply handles IP classification after DNS resolution
 func (d *Daemon) classifyAndApply(iface, fqdn string, oldIPs, newIPs []net.IP) {
+	// Serialize so concurrent resolutions (e.g. polyglotte + ide3 both firing)
+	// see each other's results and correctly classify shared IPs.
+	d.classifyMu.Lock()
+	defer d.classifyMu.Unlock()
+
 	rules := d.getOrCreateIface(iface)
 
 	// Build full FQDN→IPs map for classification
@@ -521,6 +531,7 @@ func (d *Daemon) classifyAndApply(iface, fqdn string, oldIPs, newIPs []net.IP) {
 			_ = d.xdp.RemoveSharedIP(ifindex, ip)
 		}
 		d.l7Engine.RemoveSharedFQDN(iface, fqdnName)
+		d.l7Engine.RemoveSharedIP(ipStr)
 
 		// Add to tentative
 		rules.TentativeIPs[ipStr] = TentativeEntry{FQDN: fqdnName, LastSeen: time.Now()}
@@ -548,6 +559,7 @@ func (d *Daemon) classifyAndApply(iface, fqdn string, oldIPs, newIPs []net.IP) {
 			_ = d.xdp.RemoveTentativeIP(ifindex, ip)
 			_ = d.xdp.AddSharedIP(ifindex, ip)
 		}
+		d.l7Engine.AddSharedIP(ipStr)
 
 		// Register all sharing FQDNs in L7
 		for _, fn := range fqdnNames {
