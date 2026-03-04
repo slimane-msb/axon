@@ -1,0 +1,4 @@
+*.log
+TESTING.md
+build.sh
+test*.sh
