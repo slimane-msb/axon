@@ -1,40 +1,60 @@
-# Makefile for axon BPF unit tests
-CC       = gcc
-BPF_CC   = clang
-CFLAGS   = -O2 -Wall -Wextra
-LDFLAGS  = -lbpf -lelf -lz
+# Makefile for axon BPF firewall tests
+# Usage:
+#   make test-xdp    — compile BPF + userspace, run BPF_PROG_TEST_RUN unit tests
+#   make test-lo     — compile BPF + live runner, attach to lo, real UDP packet tests
+#   make test-wifi   — compile BPF + live runner, lo tests + wlp8s0 attach/detach
+#   make all         — build everything (no run)
+#   make clean       — remove all build artifacts
+#   make deps        — install required packages
+
+CC        = gcc
+BPF_CC    = clang
+CFLAGS    = -O2 -Wall -Wextra
+LDFLAGS   = -lbpf -lelf -lz
 BPF_FLAGS = -O2 -g -target bpf -I /usr/include/$(shell uname -m)-linux-gnu
 
-# Files
-BPF_SRC  = xdp_firewall.c
-BPF_OBJ  = /tmp/xdp_firewall.o
-TEST_SRC = test_firewall.c
-TARGET   = test_firewall
+WIFI_IFACE ?= wlp8s0
 
-.PHONY: all test clean deps run_all
+BPF_SRC       = xdp_firewall.c
+BPF_OBJ       = /tmp/xdp_firewall.o
+TEST_XDP_SRC  = test_firewall.c
+TEST_XDP_BIN  = test_firewall
+TEST_LIVE_SRC = test_firewall_live.c
+TEST_LIVE_BIN = test_firewall_live
 
-# The default 'make' now builds both the BPF object and the test runner
-all: $(BPF_OBJ) $(TARGET)
+.PHONY: all test-xdp test-lo test-wifi clean deps
 
-# Rule to compile the BPF program
+# ── Build targets ────────────────────────────────────────────
+
+all: $(BPF_OBJ) $(TEST_XDP_BIN) $(TEST_LIVE_BIN)
+
 $(BPF_OBJ): $(BPF_SRC)
 	$(BPF_CC) $(BPF_FLAGS) -c $< -o $@
 
-# Rule to compile the Userspace test runner
-$(TARGET): $(TEST_SRC)
+$(TEST_XDP_BIN): $(TEST_XDP_SRC)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Build, Run, and Clean immediately after
-run_all: clean all
-	sudo ./$(TARGET) $(BPF_OBJ)
-	$(MAKE) clean
+$(TEST_LIVE_BIN): $(TEST_LIVE_SRC)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Standard test runner
-test: all
-	sudo ./$(TARGET) $(BPF_OBJ)
+# ── Test targets ─────────────────────────────────────────────
+
+# BPF_PROG_TEST_RUN unit tests (no real interface, no pinning)
+test-xdp: $(BPF_OBJ) $(TEST_XDP_BIN)
+	sudo ./$(TEST_XDP_BIN) $(BPF_OBJ)
+
+# Live packet tests on loopback only
+test-lo: $(BPF_OBJ) $(TEST_LIVE_BIN)
+	sudo ./$(TEST_LIVE_BIN) $(BPF_OBJ)
+
+# Live packet tests on loopback + attach/detach on WiFi interface
+test-wifi: $(BPF_OBJ) $(TEST_LIVE_BIN)
+	sudo ./$(TEST_LIVE_BIN) $(BPF_OBJ) $(WIFI_IFACE)
+
+# ── Utilities ────────────────────────────────────────────────
 
 deps:
 	sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev clang llvm
 
 clean:
-	rm -f $(TARGET) $(BPF_OBJ)
+	rm -f $(TEST_XDP_BIN) $(TEST_LIVE_BIN) $(BPF_OBJ)
