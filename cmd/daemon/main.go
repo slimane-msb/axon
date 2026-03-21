@@ -21,7 +21,7 @@ import (
 const (
 	sockPath    = "/tmp/blockd.sock"
 	xdpBin      = "./ebpf/block_ip"
-	l7Bin       = "./sinkhole/block"
+	l7Bin       = "./sinkhole/target/release/ctl"
 	syncInterval = 30 * time.Second
 )
 
@@ -126,6 +126,27 @@ func runBin(tag, bin, iface, val, op string) error {
 	return nil
 }
 
+func runL7(val, op string) error {
+	abs, err := filepath.Abs(l7Bin)
+	if err != nil {
+		return err
+	}
+	log.Printf("[sinkhole] exec: %s %s %s", abs, op, val)
+	cmd := exec.Command(abs, op, val)
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			log.Printf("[sinkhole] %s", line)
+		}
+	}
+	if err != nil {
+		log.Printf("[sinkhole] error: %v", err)
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("[sinkhole] ok: %s %s", op, val)
+	return nil
+}
+
 func syncIface(iface string, s *IFState) error {
 	log.Printf("[daemon] sync %s", iface)
 	wantL3 := map[string]bool{}
@@ -171,14 +192,14 @@ func syncIface(iface string, s *IFState) error {
 	for f := range s.AppliedL7 {
 		if !wantL7[f] {
 			log.Printf("[daemon] remove L7 %s on %s", f, iface)
-			runBin("sinkhole", l7Bin, iface, f, "remove")
+			runL7(f, "remove")
 			delete(s.AppliedL7, f)
 		}
 	}
 	for f := range wantL7 {
 		if !s.AppliedL7[f] {
 			log.Printf("[daemon] add L7 %s on %s", f, iface)
-			if err := runBin("sinkhole", l7Bin, iface, f, "add"); err != nil {
+			if err := runL7(f, "add"); err != nil {
 				return err
 			}
 			s.AppliedL7[f] = true
@@ -249,7 +270,7 @@ func handle(m Msg) (string, error) {
 			runBin("ebpf", xdpBin, m.Iface, ip, "remove")
 		}
 		for f := range s.AppliedL7 {
-			runBin("sinkhole", l7Bin, m.Iface, f, "remove")
+			runL7(f, "remove")
 		}
 		delete(db, m.Iface)
 		log.Printf("[daemon] removed iface %s", m.Iface)
