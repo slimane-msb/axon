@@ -14,5 +14,8 @@ cli:
 start-daemon: daemon
 	sudo ./$(DAEMON)
 
+zip:
+	zip -r ~/Downloads/axon.zip . -x "sinkhole/target/*"
+
 clean:
 	rm -f $(DAEMON) $(CLI)
