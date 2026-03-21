@@ -1,3 +1,12 @@
+sudo rm -f /tmp/sinkhole.list /tmp/sinkhole-ctl.sock
+make add-nftable
+make start 
+
+# Terminal 2 : 
+make add 
+make remove 
+..
+
 curl atun.com
 wget atun.com
 

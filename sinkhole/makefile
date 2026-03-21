@@ -1,4 +1,8 @@
-.PHONY: add-nftable rm-nftable list-nftable
+.PHONY: add-nftable rm-nftable list-nftable add add-shared remove add-many remove-many
+
+WEB = atun.com
+WEBSHARED = ledvance.ewyse.agency
+FILE = webs.txt
 
 add-nftable:
 	-sudo iptables -N AXON_SINKHOLE
@@ -23,6 +27,20 @@ list-nftable:
 build:
 	cargo build --release
 
-start:
-	sudo ./target/release/sinkhole ledvance.ewyse.agency atun.com
+start: build
+	./target/release/ctl ledvance.ewyse.agency atun.com
 
+add: build
+	./target/release/ctl add $(WEB)
+
+add-shared: build
+	./target/release/ctl add $(WEBSHARED)
+
+remove: build
+	./target/release/ctl remove $(WEB)
+
+add-many: build
+	./target/release/ctl file-add $(FILE)
+
+remove-many: build
+	./target/release/ctl file-remove $(FILE)
