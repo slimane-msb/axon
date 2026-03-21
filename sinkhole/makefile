@@ -2,6 +2,7 @@ RS_COMPILER = rustc
 BINARY = block
 INTERFACE = wlp8s0
 WEB = atun.com
+WEBSHARED = ledvance.ewyse.agency
 FILE = webs.txt
 
 all: $(BINARY)
@@ -11,6 +12,9 @@ $(BINARY): block.rs
 
 add: all
 	@./$(BINARY) $(INTERFACE) $(WEB) add
+
+add-shared: all
+	@./$(BINARY) $(INTERFACE) $(WEBSHARED) add
 
 remove: all
 	@./$(BINARY) $(INTERFACE) $(WEB) remove

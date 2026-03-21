@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,12 +15,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const (
-	sockPath = "/tmp/blockd.sock"
-	xdpBin   = "./ebpf/block_ip"
-	l7Bin    = "./sinkhole/block"
+	sockPath    = "/tmp/blockd.sock"
+	xdpBin      = "./ebpf/block_ip"
+	l7Bin       = "./sinkhole/block"
+	syncInterval = 30 * time.Second
 )
 
 type Msg struct {
@@ -66,8 +70,37 @@ func resolveIPv4(fqdn string) string {
 			return a
 		}
 	}
-	log.Printf("[daemon] resolve %s: no IPv4 result", fqdn)
+	log.Printf("[daemon] resolve %s: no IPv4", fqdn)
 	return ""
+}
+
+func revdns(ip string) []string {
+	url := fmt.Sprintf("https://api.hackertarget.com/reverseiplookup/?q=%s", ip)
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Printf("[daemon] revdns %s: %v", ip, err)
+		return nil
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	result := strings.TrimSpace(string(body))
+	if strings.Contains(result, "error") || strings.Contains(result, "No records") || result == "" {
+		log.Printf("[daemon] revdns %s: no neighbors", ip)
+		return nil
+	}
+	neighbors := strings.Split(result, "\n")
+	log.Printf("[daemon] revdns %s: %d neighbors", ip, len(neighbors))
+	return neighbors
+}
+
+func fqdnIsShared(fqdn, ip string) bool {
+	neighbors := revdns(ip)
+	for _, n := range neighbors {
+		if strings.TrimSpace(n) != fqdn {
+			return true
+		}
+	}
+	return false
 }
 
 func runBin(tag, bin, iface, val, op string) error {
@@ -94,7 +127,7 @@ func runBin(tag, bin, iface, val, op string) error {
 }
 
 func syncIface(iface string, s *IFState) error {
-	log.Printf("[daemon] sync %s: ips=%v fqdns=%v", iface, keys(s.IPs), keys(s.FQDNs))
+	log.Printf("[daemon] sync %s", iface)
 	wantL3 := map[string]bool{}
 	wantL7 := map[string]bool{}
 
@@ -102,37 +135,28 @@ func syncIface(iface string, s *IFState) error {
 		wantL3[ip] = true
 	}
 
-	ipToFQDNs := map[string][]string{}
 	for fqdn := range s.FQDNs {
-		if ip := resolveIPv4(fqdn); ip != "" {
-			ipToFQDNs[ip] = append(ipToFQDNs[ip], fqdn)
+		ip := resolveIPv4(fqdn)
+		if ip == "" {
+			continue
 		}
-	}
-
-	for ip, fqdns := range ipToFQDNs {
-		if len(fqdns) > 1 {
-			log.Printf("[daemon] ip %s shared by %v -> L7", ip, fqdns)
-			for _, f := range fqdns {
-				wantL7[f] = true
-			}
+		if fqdnIsShared(fqdn, ip) {
+			log.Printf("[daemon] %s shares ip %s -> L7", fqdn, ip)
+			wantL7[fqdn] = true
 		} else {
-			log.Printf("[daemon] fqdn %s -> ip %s unique -> L3", fqdns[0], ip)
+			log.Printf("[daemon] %s alone on ip %s -> L3", fqdn, ip)
 			wantL3[ip] = true
 		}
 	}
 
 	log.Printf("[daemon] sync %s: wantL3=%v wantL7=%v", iface, keys(wantL3), keys(wantL7))
 
-	var delL3 []string
 	for ip := range s.AppliedL3 {
 		if !wantL3[ip] {
-			delL3 = append(delL3, ip)
+			log.Printf("[daemon] remove L3 %s on %s", ip, iface)
+			runBin("ebpf", xdpBin, iface, ip, "remove")
+			delete(s.AppliedL3, ip)
 		}
-	}
-	for _, ip := range delL3 {
-		log.Printf("[daemon] remove L3 %s on %s", ip, iface)
-		runBin("ebpf", xdpBin, iface, ip, "remove")
-		delete(s.AppliedL3, ip)
 	}
 	for ip := range wantL3 {
 		if !s.AppliedL3[ip] {
@@ -144,16 +168,12 @@ func syncIface(iface string, s *IFState) error {
 		}
 	}
 
-	var delL7 []string
 	for f := range s.AppliedL7 {
 		if !wantL7[f] {
-			delL7 = append(delL7, f)
+			log.Printf("[daemon] remove L7 %s on %s", f, iface)
+			runBin("sinkhole", l7Bin, iface, f, "remove")
+			delete(s.AppliedL7, f)
 		}
-	}
-	for _, f := range delL7 {
-		log.Printf("[daemon] remove L7 %s on %s", f, iface)
-		runBin("sinkhole", l7Bin, iface, f, "remove")
-		delete(s.AppliedL7, f)
 	}
 	for f := range wantL7 {
 		if !s.AppliedL7[f] {
@@ -166,6 +186,15 @@ func syncIface(iface string, s *IFState) error {
 	}
 
 	return nil
+}
+
+func syncAll() {
+	mu.Lock()
+	defer mu.Unlock()
+	log.Printf("[daemon] periodic sync: %d interfaces", len(db))
+	for iface, s := range db {
+		syncIface(iface, s)
+	}
 }
 
 func keys(m map[string]bool) []string {
@@ -214,7 +243,6 @@ func handle(m Msg) (string, error) {
 	case "remove-iface":
 		s := db[m.Iface]
 		if s == nil {
-			log.Printf("[daemon] remove-iface: %s not found", m.Iface)
 			return "", nil
 		}
 		for ip := range s.AppliedL3 {
@@ -234,7 +262,6 @@ func handle(m Msg) (string, error) {
 	case "remove-ip":
 		s := db[m.Iface]
 		if s == nil {
-			log.Printf("[daemon] remove-ip: iface %s not found", m.Iface)
 			return "", nil
 		}
 		delete(s.IPs, m.Val)
@@ -248,7 +275,6 @@ func handle(m Msg) (string, error) {
 	case "remove-web":
 		s := db[m.Iface]
 		if s == nil {
-			log.Printf("[daemon] remove-web: iface %s not found", m.Iface)
 			return "", nil
 		}
 		delete(s.FQDNs, m.Val)
@@ -356,6 +382,12 @@ func main() {
 		ln.Close()
 		os.Remove(sockPath)
 		os.Exit(0)
+	}()
+	go func() {
+		t := time.NewTicker(syncInterval)
+		for range t.C {
+			syncAll()
+		}
 	}()
 	log.Printf("[daemon] listening on %s", sockPath)
 	serve(ln)
