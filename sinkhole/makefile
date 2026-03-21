@@ -1,39 +1,28 @@
-BINARY = sinkhole
-CARGO_BIN = ./target/release/$(BINARY)
-INTERFACE = wlp8s0
-WEB = atun.com
-WEBSHARED = ledvance.ewyse.agency
-FILE = webs.txt
-SOCKET = /tmp/sinkhole.sock
+.PHONY: add-nftable rm-nftable list-nftable
 
-all: $(CARGO_BIN)
+add-nftable:
+	-sudo iptables -N AXON_SINKHOLE
+	-sudo iptables -I OUTPUT 1 -j AXON_SINKHOLE
+	-sudo iptables -I FORWARD 1 -j AXON_SINKHOLE
+	sudo iptables -A AXON_SINKHOLE -p udp --dport 53  -j NFQUEUE --queue-num 0
+	sudo iptables -A AXON_SINKHOLE -p udp --dport 443 -j NFQUEUE --queue-num 0
+	sudo iptables -A AXON_SINKHOLE -p tcp --dport 53  -j NFQUEUE --queue-num 0
+	sudo iptables -A AXON_SINKHOLE -p tcp --dport 80  -j NFQUEUE --queue-num 0
+	sudo iptables -A AXON_SINKHOLE -p tcp --dport 443 -j NFQUEUE --queue-num 0
 
-$(CARGO_BIN): src/main.rs
-	@cargo build --release
+rm-nftable:
+	-sudo iptables -D OUTPUT -j AXON_SINKHOLE
+	-sudo iptables -D FORWARD -j AXON_SINKHOLE
+	-sudo iptables -F AXON_SINKHOLE
+	-sudo iptables -X AXON_SINKHOLE
 
-start: all
-	@sudo $(CARGO_BIN) $(INTERFACE) 
+list-nftable:
+	-sudo iptables -L AXON_SINKHOLE -n --line-numbers
+	sudo nft list ruleset
 
-add:
-	@echo "add $(WEB)" | sudo socat - UNIX-CONNECT:$(SOCKET)
+build:
+	cargo build --release
 
-add-shared:
-	@echo "add $(WEBSHARED)" | sudo socat - UNIX-CONNECT:$(SOCKET)
+start:
+	sudo ./target/release/sinkhole ledvance.ewyse.agency atun.com
 
-remove:
-	@echo "del $(WEB)" | sudo socat - UNIX-CONNECT:$(SOCKET)
-
-add-many:
-	@while read -r line; do echo "add $$line" | sudo socat - UNIX-CONNECT:$(SOCKET); done < $(FILE)
-
-remove-many:
-	@while read -r line; do echo "del $$line" | sudo socat - UNIX-CONNECT:$(SOCKET); done < $(FILE)
-
-stop:
-	@sudo pkill $(BINARY) || true
-	@sudo rm -f $(SOCKET)
-
-clean:
-	@cargo clean
-
-.PHONY: all start add add-shared remove add-many remove-many stop clean
