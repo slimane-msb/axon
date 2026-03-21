@@ -1,34 +1,39 @@
-RS_COMPILER = rustc
-BINARY = block
+BINARY = sinkhole
+CARGO_BIN = ./target/release/$(BINARY)
 INTERFACE = wlp8s0
 WEB = atun.com
 WEBSHARED = ledvance.ewyse.agency
 FILE = webs.txt
+SOCKET = /tmp/sinkhole.sock
 
-all: $(BINARY)
+all: $(CARGO_BIN)
 
-$(BINARY): block.rs
-	@$(RS_COMPILER) block.rs -o $(BINARY)
+$(CARGO_BIN): src/main.rs
+	@cargo build --release
 
-add: all
-	@./$(BINARY) $(INTERFACE) $(WEB) add
+start: all
+	@sudo $(CARGO_BIN) $(INTERFACE) 
 
-add-shared: all
-	@./$(BINARY) $(INTERFACE) $(WEBSHARED) add
+add:
+	@echo "add $(WEB)" | sudo socat - UNIX-CONNECT:$(SOCKET)
 
-remove: all
-	@./$(BINARY) $(INTERFACE) $(WEB) remove
+add-shared:
+	@echo "add $(WEBSHARED)" | sudo socat - UNIX-CONNECT:$(SOCKET)
 
-add-many: all
-	@./$(BINARY) $(INTERFACE) $(FILE) file-add
+remove:
+	@echo "del $(WEB)" | sudo socat - UNIX-CONNECT:$(SOCKET)
 
-remove-many: all
-	@./$(BINARY) $(INTERFACE) $(FILE) file-remove
+add-many:
+	@while read -r line; do echo "add $$line" | sudo socat - UNIX-CONNECT:$(SOCKET); done < $(FILE)
 
-stop: all
-	@./$(BINARY) stop
+remove-many:
+	@while read -r line; do echo "del $$line" | sudo socat - UNIX-CONNECT:$(SOCKET); done < $(FILE)
+
+stop:
+	@sudo pkill $(BINARY) || true
+	@sudo rm -f $(SOCKET)
 
 clean:
-	@rm -f $(BINARY)
+	@cargo clean
 
-.PHONY: all clean add add-many remove remove-many stop
+.PHONY: all start add add-shared remove add-many remove-many stop clean

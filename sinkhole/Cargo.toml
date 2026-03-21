@@ -1,0 +1,12 @@
+[package]
+name = "sinkhole"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nfq = "0.2"
+etherparse = "0.14"
+
+[profile.release]
+opt-level = 3
+strip = true
