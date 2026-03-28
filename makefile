@@ -14,6 +14,9 @@ cli:
 start-daemon: daemon
 	sudo ./$(DAEMON)
 
+test: daemon cli
+	sudo go test -v ./tests/integration_test.go
+
 zip:
 	zip -r ~/Downloads/axon.zip . -x "sinkhole/target/*"
 

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 nfq = "0.2"
 etherparse = "0.14"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["rustls-tls"] }
 
 [profile.release]
 opt-level = 3

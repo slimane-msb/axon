@@ -27,8 +27,14 @@ list-nftable:
 build:
 	cargo build --release
 
-start: build
+start: build add-nftable
 	./target/release/ctl atun.com
+
+test: build add-nftable
+	./target/release/ctl atun.com > service.log 2>&1 & echo $$! > service.pid
+	sleep 2
+	-sudo -E $$(which cargo) test --test fqdn_test -- --nocapture
+	kill $$(cat service.pid) && rm service.pid service.log
 
 add: build
 	./target/release/ctl add $(WEB)
