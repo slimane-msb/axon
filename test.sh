@@ -21,6 +21,10 @@ ping 185.99.197.3
 
 curl fox.com
 sudo ./axon add-web wlp8s0 fox.com
+sudo ./axon add-web wlp8s0 london.com
+sudo ./axon add-web wlp8s0 youtube.com
+sudo ./axon add-web wlp8s0 fifa.com
+
 curl fox.com
 curl cat.com
 
