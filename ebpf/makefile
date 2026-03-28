@@ -19,6 +19,9 @@ check-interface:
 monitor:
 	sudo tcpdump -n -i $(INTERFACE) host $(IP)
 
+test:
+	
+
 unset:
 	-sudo ip link set dev $(INTERFACE) xdp off
 
