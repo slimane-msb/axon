@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,26 +17,18 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	pb "axon/proto"
+
+	"google.golang.org/grpc"
 )
 
 const (
-	sockPath    = "/tmp/blockd.sock"
-	xdpBin      = "./ebpf/block_ip"
-	l7Bin       = "./sinkhole/target/release/ctl"
+	grpcAddr     = "127.0.0.1:50051"
+	xdpBin       = "./ebpf/block_ip"
+	l7Bin        = "./sinkhole/target/release/ctl"
 	syncInterval = 60 * 5 * time.Second
 )
-
-type Msg struct {
-	Cmd   string `json:"cmd"`
-	Iface string `json:"iface"`
-	Val   string `json:"val"`
-}
-
-type Resp struct {
-	OK   bool   `json:"ok"`
-	Err  string `json:"err,omitempty"`
-	Data string `json:"data,omitempty"`
-}
 
 type IFState struct {
 	IPs       map[string]bool
@@ -250,7 +243,7 @@ func getOrCreate(iface string) *IFState {
 	return db[iface]
 }
 
-func handle(m Msg) (string, error) {
+func handle(m *pb.Request) (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -364,52 +357,48 @@ func handle(m Msg) (string, error) {
 	return "", nil
 }
 
-func serve(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func(c net.Conn) {
-			defer c.Close()
-			var m Msg
-			if err := json.NewDecoder(c).Decode(&m); err != nil {
-				log.Printf("[daemon] decode error: %v", err)
-				json.NewEncoder(c).Encode(Resp{OK: false, Err: err.Error()})
-				return
-			}
-			data, err := handle(m)
-			if err != nil {
-				log.Printf("[daemon] handle error: %v", err)
-				json.NewEncoder(c).Encode(Resp{OK: false, Err: err.Error()})
-			} else {
-				json.NewEncoder(c).Encode(Resp{OK: true, Data: data})
-			}
-		}(c)
+type server struct {
+	pb.UnimplementedAxonServer
+}
+
+func (s *server) Exec(_ context.Context, req *pb.Request) (*pb.Response, error) {
+	data, err := handle(req)
+	if err != nil {
+		log.Printf("[daemon] handle error: %v", err)
+		return &pb.Response{Ok: false, Err: err.Error()}, nil
 	}
+	return &pb.Response{Ok: true, Data: data}, nil
 }
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	os.Remove(sockPath)
-	ln, err := net.Listen("unix", sockPath)
+
+	ln, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	gs := grpc.NewServer()
+	pb.RegisterAxonServer(gs, &server{})
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
-		ln.Close()
-		os.Remove(sockPath)
+		log.Printf("[daemon] shutting down")
+		gs.GracefulStop()
 		os.Exit(0)
 	}()
+
 	go func() {
 		t := time.NewTicker(syncInterval)
 		for range t.C {
 			syncAll()
 		}
 	}()
-	log.Printf("[daemon] listening on %s", sockPath)
-	serve(ln)
+
+	log.Printf("[daemon] listening on %s", grpcAddr)
+	if err := gs.Serve(ln); err != nil {
+		log.Fatal(err)
+	}
 }

@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package axon;
+
+option go_package = "axon/proto";
+
+service Axon {
+  rpc Exec(Request) returns (Response);
+}
+
+message Request {
+  string cmd   = 1;
+  string iface = 2;
+  string val   = 3;
+}
+
+message Response {
+  bool   ok   = 1;
+  string err  = 2;
+  string data = 3;
+}

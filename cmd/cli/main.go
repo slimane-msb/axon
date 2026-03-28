@@ -1,26 +1,19 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
+	"time"
+
+	pb "axon/proto"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
-const sockPath = "/tmp/blockd.sock"
-
-type Msg struct {
-	Cmd   string `json:"cmd"`
-	Iface string `json:"iface"`
-	Val   string `json:"val"`
-}
-
-type Resp struct {
-	OK   bool   `json:"ok"`
-	Err  string `json:"err,omitempty"`
-	Data string `json:"data,omitempty"`
-}
+const grpcAddr = "127.0.0.1:50051"
 
 var needsVal = map[string]bool{
 	"add-ip": true, "remove-ip": true,
@@ -28,24 +21,30 @@ var needsVal = map[string]bool{
 	"add-web-file": true, "remove-web-file": true,
 }
 
-func send(m Msg) error {
-	c, err := net.Dial("unix", sockPath)
+func send(m *pb.Request) error {
+	log.Printf("[cli] connecting to %s", grpcAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, grpcAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
 	if err != nil {
 		return fmt.Errorf("daemon not running: %w", err)
 	}
-	defer c.Close()
-	if err := json.NewEncoder(c).Encode(m); err != nil {
+	defer conn.Close()
+
+	log.Printf("[cli] sending cmd=%s iface=%s val=%s", m.Cmd, m.Iface, m.Val)
+	resp, err := pb.NewAxonClient(conn).Exec(ctx, m)
+	if err != nil {
 		return err
 	}
-	var r Resp
-	if err := json.NewDecoder(c).Decode(&r); err != nil {
-		return err
+	if !resp.Ok {
+		return fmt.Errorf("%s", resp.Err)
 	}
-	if !r.OK {
-		return fmt.Errorf("%s", r.Err)
-	}
-	if r.Data != "" {
-		fmt.Println(r.Data)
+	if resp.Data != "" {
+		fmt.Println(resp.Data)
 	} else {
 		fmt.Println("ok")
 	}
@@ -80,7 +79,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: '%s' requires both <iface> and <val>\n", cmd)
 		usage()
 	}
-	m := Msg{Cmd: cmd}
+	m := &pb.Request{Cmd: cmd}
 	if len(args) > 1 {
 		m.Iface = args[1]
 	}
