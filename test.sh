@@ -31,5 +31,6 @@ curl ledvance.ewyse.agency
 sudo ./axon add-web wlp8s0 polyglotte-institute.eu
 curl polyglotte-institute.eu
 sudo ./axon remove-web wlp8s0 ledvance.ewyse.agency
+sudo ./axon remove-web wlp8s0 polyglotte-institute.eu
 
 sudo ./axon status wlp8s0

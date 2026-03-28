@@ -28,7 +28,7 @@ build:
 	cargo build --release
 
 start: build
-	./target/release/ctl ledvance.ewyse.agency atun.com
+	./target/release/ctl atun.com
 
 add: build
 	./target/release/ctl add $(WEB)
