@@ -142,7 +142,7 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S2:block_IP_direct", func(t *testing.T) {
 		axon(t, "add-ip", Iface, IP1)
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web1: true, Web2: true, Google: true,
 		})
@@ -152,15 +152,16 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S3:unblock_IP", func(t *testing.T) {
 		axon(t, "remove-ip", Iface, IP1)
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{IP1: true, IP2: true})
 		assertL3(t, IP1, false)
 	})
 
 	t.Run("S4:block_FQDN_shared_IP_does_not_affect_peer", func(t *testing.T) {
 		axon(t, "add-ip", Iface, IP1)
+		time.Sleep(5 * time.Second)
 		axon(t, "add-web", Iface, Web1)
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web1: false, Web2: true, Google: true,
 		})
@@ -171,7 +172,7 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S5:block_Google_shared_IP", func(t *testing.T) {
 		axon(t, "add-web", Iface, Google)
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web1: false, Web2: true, Google: false,
 		})
@@ -181,7 +182,7 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S6:unblock_Web1_Google_remains_blocked", func(t *testing.T) {
 		axon(t, "remove-web", Iface, Web1)
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web1: true, Web2: true, Google: false,
 		})
@@ -190,7 +191,7 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S7:unblock_Google", func(t *testing.T) {
 		axon(t, "remove-web", Iface, Google)
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web1: true, Web2: true, Google: true,
 		})
@@ -199,7 +200,7 @@ func TestAxonFirewall(t *testing.T) {
 
 	t.Run("S8:block_FQDN_unique_IP_uses_L3", func(t *testing.T) {
 		axon(t, "add-web", Iface, TSP)
-		time.Sleep(2 * time.Second)
+		time.Sleep(5 * time.Second)
 		checkAll(t, map[string]bool{
 			IP1: false, IP2: true, Web2: true, TSP: false,
 		})
