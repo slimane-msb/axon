@@ -22,7 +22,7 @@ const (
 	sockPath    = "/tmp/blockd.sock"
 	xdpBin      = "./ebpf/block_ip"
 	l7Bin       = "./sinkhole/target/release/ctl"
-	syncInterval = 30 * time.Second
+	syncInterval = 60*5 * time.Second
 )
 
 type Msg struct {
