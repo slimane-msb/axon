@@ -1,7 +1,13 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::fs;
+use std::process;
+use std::sync::{Arc, RwLock};
 use nfq::{Queue, Verdict};
 use etherparse::{SlicedPacket, TransportSlice};
+use tokio::signal::unix::{signal, SignalKind};
+
+const LIST_FILE: &str = "/tmp/sinkhole-ctl.list";
+const PID_FILE: &str = "/tmp/sinkhole-ctl.pid";
 
 fn extract_http_host(payload: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(payload).ok()?;
@@ -143,7 +149,20 @@ fn is_blocked(hostname: &str, blocked: &HashSet<String>) -> bool {
         || blocked.contains(hostname)
 }
 
-fn handle_tcp(dport: u16, payload: &[u8], blocked: &Arc<HashSet<String>>) -> Verdict {
+fn load_list_from_file() -> HashSet<String> {
+    match fs::read_to_string(LIST_FILE) {
+        Ok(contents) => contents
+            .lines()             
+            .map(|l| l.trim())  
+            .filter(|l| !l.is_empty()) 
+    
+            .map(|l| normalize(l).to_string()) 
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
+fn handle_tcp(dport: u16, payload: &[u8], blocked: &Arc<RwLock<HashSet<String>>>) -> Verdict {
     if payload.is_empty() {
         return Verdict::Accept;
     }
@@ -152,8 +171,9 @@ fn handle_tcp(dport: u16, payload: &[u8], blocked: &Arc<HashSet<String>>) -> Ver
         443 => extract_tls_sni(payload),
         _ => return Verdict::Accept,
     };
+    let blocked = blocked.read().unwrap();
     match hostname {
-        Some(ref h) if is_blocked(h, blocked) => {
+        Some(ref h) if is_blocked(h, &blocked) => {
             eprintln!("[DROP TCP:{}] {}", dport, h);
             Verdict::Drop
         }
@@ -165,16 +185,18 @@ fn handle_tcp(dport: u16, payload: &[u8], blocked: &Arc<HashSet<String>>) -> Ver
     }
 }
 
-fn handle_udp(dport: u16, payload: &[u8], blocked: &Arc<HashSet<String>>) -> Verdict {
+fn handle_udp(dport: u16, payload: &[u8], blocked: &Arc<RwLock<HashSet<String>>>) -> Verdict {
     match dport {
         53 => match extract_dns_query_name(payload) {
-            Some(ref name) if is_blocked(name, blocked) => {
-                eprintln!("[DROP DNS] {}", name);
-                Verdict::Drop
-            }
             Some(ref name) => {
-                eprintln!("[PASS DNS] {}", name);
-                Verdict::Accept
+                let blocked = blocked.read().unwrap();
+                if is_blocked(name, &blocked) {
+                    eprintln!("[DROP DNS] {}", name);
+                    Verdict::Drop
+                } else {
+                    eprintln!("[PASS DNS] {}", name);
+                    Verdict::Accept
+                }
             }
             None => Verdict::Accept,
         },
@@ -186,7 +208,7 @@ fn handle_udp(dport: u16, payload: &[u8], blocked: &Arc<HashSet<String>>) -> Ver
     }
 }
 
-fn decide(raw_ip: &[u8], blocked: &Arc<HashSet<String>>) -> Verdict {
+fn decide(raw_ip: &[u8], blocked: &Arc<RwLock<HashSet<String>>>) -> Verdict {
     let packet = match SlicedPacket::from_ip(raw_ip) {
         Ok(p) => p,
         Err(_) => return Verdict::Accept,
@@ -202,46 +224,50 @@ fn decide(raw_ip: &[u8], blocked: &Arc<HashSet<String>>) -> Verdict {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        eprintln!("Usage: l7block <domain> [domain2] ...");
-        eprintln!();
-        eprintln!("Setup (run as root):");
-        eprintln!("  iptables -I OUTPUT  -p tcp --dport 80  -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I OUTPUT  -p tcp --dport 443 -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I OUTPUT  -p udp --dport 53  -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I OUTPUT  -p udp --dport 443 -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I FORWARD -p tcp --dport 80  -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I FORWARD -p tcp --dport 443 -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I FORWARD -p udp --dport 53  -j NFQUEUE --queue-num 0");
-        eprintln!("  iptables -I FORWARD -p udp --dport 443 -j NFQUEUE --queue-num 0");
-        std::process::exit(1);
-    }
 
-    let blocked: Arc<HashSet<String>> = Arc::new(
-        args.iter()
-            .map(|s| normalize(s.as_str()).to_string())
-            .collect(),
-    );
+    let initial: HashSet<String> = args
+        .iter()
+        .map(|s| normalize(s.as_str()).to_string())
+        .collect();
 
-    eprintln!("L7 blocker active. Blocked: {:?}", blocked);
+    let blocked: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(initial.clone()));
+    let pid = process::id();
+    fs::write(PID_FILE, pid.to_string()).expect("failed to write pid file");
+    eprintln!("[sinkhole] pid={}", pid);
+    eprintln!("L7 blocker active. Blocked: {:?}", initial);
 
-    let mut queue = Queue::open().expect("Failed to open NFQUEUE — run as root");
-    queue.bind(0).expect("Failed to bind queue 0");
-
-    loop {
-        let mut msg = match queue.recv() {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("recv error: {}", e);
-                continue;
-            }
-        };
-        let verdict = decide(msg.get_payload(), &blocked);
-        msg.set_verdict(verdict);
-        if let Err(e) = queue.verdict(msg) {
-            eprintln!("verdict error: {}", e);
+    let blocked_reload = Arc::clone(&blocked);
+    tokio::spawn(async move {
+        let mut sigusr1 = signal(SignalKind::user_defined1()).expect("failed to register SIGUSR1");
+        loop {
+            sigusr1.recv().await;
+            let new_list = load_list_from_file();
+            eprintln!("[sinkhole] reloaded blocked list: {:?}", new_list);
+            *blocked_reload.write().unwrap() = new_list;
         }
-    }
+    });
+
+    let blocked_nfq = Arc::clone(&blocked);
+    tokio::task::spawn_blocking(move || {
+        let mut queue = Queue::open().expect("Failed to open NFQUEUE — run as root");
+        queue.bind(0).expect("Failed to bind queue 0");
+
+        loop {
+            let mut msg = match queue.recv() {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("recv error: {}", e);
+                    continue;
+                }
+            };
+            let verdict = decide(msg.get_payload(), &blocked_nfq);
+            msg.set_verdict(verdict);
+            if let Err(e) = queue.verdict(msg) {
+                eprintln!("verdict error: {}", e);
+            }
+        }
+    }).await.ok();
 }

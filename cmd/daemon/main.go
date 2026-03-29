@@ -3,12 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,7 +26,7 @@ const (
 	grpcAddr     = "127.0.0.1:50051"
 	xdpBin       = "./ebpf/block_ip"
 	l7Bin        = "./sinkhole/target/release/ctl"
-	syncInterval = 60 * 5 * time.Second
+	syncInterval = 5 * 60 * time.Second
 )
 
 type IFState struct {
@@ -67,55 +66,81 @@ func resolveIPv4(fqdn string) string {
 	return ""
 }
 
-func revdns(ip string) []string {
-	url := fmt.Sprintf("https://api.hackertarget.com/reverseiplookup/?q=%s", ip)
-	resp, err := http.Get(url)
-	if err != nil {
-		log.Printf("[daemon] revdns %s: %v", ip, err)
-		return nil
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	result := strings.TrimSpace(string(body))
-	if strings.Contains(result, "error") || strings.Contains(result, "No records") || result == "" {
-		log.Printf("[daemon] revdns %s: no neighbors", ip)
-		return nil
-	}
-	neighbors := strings.Split(result, "\n")
-	log.Printf("[daemon] revdns %s: %d neighbors", ip, len(neighbors))
-	return neighbors
-}
-
-func fqdnIsShared(fqdn, ip string) bool {
-	neighbors := revdns(ip)
-	for _, n := range neighbors {
-		if strings.TrimSpace(n) != fqdn {
+func isSharedInfrastructure(fqdn, ip string, peers map[string]bool) bool {
+	for otherF := range peers {
+		if otherF != fqdn && resolveIPv4(otherF) == ip {
+			log.Printf("[daemon] local conflict: %s and %s share %s -> shared", fqdn, otherF, ip)
 			return true
 		}
 	}
+
+	conf := &tls.Config{InsecureSkipVerify: true, ServerName: fqdn}
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", ip+":443", conf)
+	if err != nil {
+		log.Printf("[daemon] tls probe %s (%s): %v -> dedicated (L3)", fqdn, ip, err)
+		return false
+	}
+	defer conn.Close()
+
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		log.Printf("[daemon] tls probe %s: no certs -> shared (L7)", fqdn)
+		return true
+	}
+
+	leaf := certs[0]
+
+	if len(leaf.DNSNames) > 5 {
+		log.Printf("[daemon] tls probe %s: %d SANs -> shared (L7)", fqdn, len(leaf.DNSNames))
+		return true
+	}
+
+	isExact := strings.EqualFold(leaf.Subject.CommonName, fqdn)
+	for _, san := range leaf.DNSNames {
+		if strings.EqualFold(san, fqdn) {
+			isExact = true
+			break
+		}
+	}
+
+	if !isExact {
+		log.Printf("[daemon] tls probe %s: fqdn not in cert -> shared (L7)", fqdn)
+		return true
+	}
+
+	if strings.Contains(leaf.Subject.CommonName, "*") {
+		log.Printf("[daemon] tls probe %s: wildcard CN -> shared (L7)", fqdn)
+		return true
+	}
+	for _, san := range leaf.DNSNames {
+		if strings.Contains(san, "*") {
+			log.Printf("[daemon] tls probe %s: wildcard SAN -> shared (L7)", fqdn)
+			return true
+		}
+	}
+
+	log.Printf("[daemon] tls probe %s: dedicated cert -> L3", fqdn)
 	return false
 }
 
-func runBin(tag, bin, iface, val, op string) error {
-	abs, err := filepath.Abs(bin)
+func runBin(iface, ip, op string) error {
+	abs, err := filepath.Abs(xdpBin)
 	if err != nil {
 		return err
 	}
-	args := []string{abs, iface, val, op}
-	log.Printf("[%s] exec: sudo %s", tag, strings.Join(args, " "))
-	cmd := exec.Command("sudo", args...)
+	log.Printf("[ebpf] sudo %s %s %s %s", abs, iface, ip, op)
+	cmd := exec.Command("sudo", abs, iface, ip, op)
 	cmd.Dir = filepath.Dir(abs)
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			log.Printf("[%s] %s", tag, line)
-		}
+		log.Printf("[ebpf] output: %s", strings.TrimSpace(string(out)))
 	}
 	if err != nil {
-		log.Printf("[%s] error: %v", tag, err)
+		log.Printf("[ebpf] error: %v", err)
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
 	}
-	log.Printf("[%s] ok: %s %s %s", tag, iface, val, op)
+	log.Printf("[ebpf] ok: %s %s %s", iface, ip, op)
 	return nil
 }
 
@@ -124,13 +149,11 @@ func runL7(val, op string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("[sinkhole] exec: %s %s %s", abs, op, val)
+	log.Printf("[sinkhole] %s %s %s", abs, op, val)
 	cmd := exec.Command(abs, op, val)
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			log.Printf("[sinkhole] %s", line)
-		}
+		log.Printf("[sinkhole] output: %s", strings.TrimSpace(string(out)))
 	}
 	if err != nil {
 		log.Printf("[sinkhole] error: %v", err)
@@ -140,75 +163,108 @@ func runL7(val, op string) error {
 	return nil
 }
 
-func syncIface(iface string, s *IFState) error {
+func syncIface(iface string, s *IFState) {
 	log.Printf("[daemon] sync %s", iface)
-	wantL3 := map[string]bool{}
-	wantL7 := map[string]bool{}
 
-	for ip := range s.IPs {
-		wantL3[ip] = true
+	type fqdnResult struct {
+		fqdn   string
+		ip     string
+		shared bool
 	}
 
-	for fqdn := range s.FQDNs {
+	fqdns := make([]string, 0, len(s.FQDNs))
+	for f := range s.FQDNs {
+		fqdns = append(fqdns, f)
+	}
+	ips := make(map[string]bool, len(s.IPs))
+	for ip := range s.IPs {
+		ips[ip] = true
+	}
+
+	allPeers := map[string]bool{}
+	for _, st := range db {
+		for f := range st.FQDNs {
+			allPeers[f] = true
+		}
+	}
+
+	mu.Unlock()
+	results := make([]fqdnResult, 0, len(fqdns))
+	for _, fqdn := range fqdns {
 		ip := resolveIPv4(fqdn)
 		if ip == "" {
 			continue
 		}
-		if fqdnIsShared(fqdn, ip) {
-			log.Printf("[daemon] %s shares ip %s -> L7", fqdn, ip)
-			wantL7[fqdn] = true
+		shared := isSharedInfrastructure(fqdn, ip, allPeers)
+		results = append(results, fqdnResult{fqdn, ip, shared})
+	}
+	mu.Lock()
+
+	wantL3 := make(map[string]bool, len(ips))
+	for ip := range ips {
+		wantL3[ip] = true
+	}
+	wantL7 := map[string]bool{}
+
+	for _, r := range results {
+		if r.shared {
+			log.Printf("[daemon] %s on %s -> L7", r.fqdn, r.ip)
+			wantL7[r.fqdn] = true
 		} else {
-			log.Printf("[daemon] %s alone on ip %s -> L3", fqdn, ip)
-			wantL3[ip] = true
+			log.Printf("[daemon] %s on %s -> L3", r.fqdn, r.ip)
+			wantL3[r.ip] = true
 		}
 	}
 
-	log.Printf("[daemon] sync %s: wantL3=%v wantL7=%v", iface, keys(wantL3), keys(wantL7))
+	log.Printf("[daemon] sync %s wantL3=%v wantL7=%v", iface, keys(wantL3), keys(wantL7))
 
 	for ip := range s.AppliedL3 {
 		if !wantL3[ip] {
 			log.Printf("[daemon] remove L3 %s on %s", ip, iface)
-			runBin("ebpf", xdpBin, iface, ip, "remove")
+			runBin(iface, ip, "remove")
 			delete(s.AppliedL3, ip)
 		}
 	}
 	for ip := range wantL3 {
 		if !s.AppliedL3[ip] {
 			log.Printf("[daemon] add L3 %s on %s", ip, iface)
-			if err := runBin("ebpf", xdpBin, iface, ip, "add"); err != nil {
-				return err
+			if err := runBin(iface, ip, "add"); err == nil {
+				s.AppliedL3[ip] = true
 			}
-			s.AppliedL3[ip] = true
 		}
 	}
 
 	for f := range s.AppliedL7 {
 		if !wantL7[f] {
-			log.Printf("[daemon] remove L7 %s on %s", f, iface)
+			log.Printf("[daemon] remove L7 %s", f)
 			runL7(f, "remove")
 			delete(s.AppliedL7, f)
 		}
 	}
 	for f := range wantL7 {
 		if !s.AppliedL7[f] {
-			log.Printf("[daemon] add L7 %s on %s", f, iface)
-			if err := runL7(f, "add"); err != nil {
-				return err
+			log.Printf("[daemon] add L7 %s", f)
+			if err := runL7(f, "add"); err == nil {
+				s.AppliedL7[f] = true
 			}
-			s.AppliedL7[f] = true
 		}
 	}
-
-	return nil
 }
 
 func syncAll() {
 	mu.Lock()
-	defer mu.Unlock()
 	log.Printf("[daemon] periodic sync: %d interfaces", len(db))
-	for iface, s := range db {
-		syncIface(iface, s)
+	ifaces := make([]string, 0, len(db))
+	for iface := range db {
+		ifaces = append(ifaces, iface)
 	}
+	for _, iface := range ifaces {
+		s := db[iface]
+		if s != nil {
+			syncIface(iface, s)
+		}
+	}
+	mu.Unlock()
 }
 
 func keys(m map[string]bool) []string {
@@ -245,58 +301,66 @@ func getOrCreate(iface string) *IFState {
 
 func handle(m *pb.Request) (string, error) {
 	mu.Lock()
-	defer mu.Unlock()
-
 	log.Printf("[daemon] cmd=%s iface=%s val=%s", m.Cmd, m.Iface, m.Val)
 
 	switch m.Cmd {
 	case "add-iface":
 		getOrCreate(m.Iface)
 		log.Printf("[daemon] added iface %s", m.Iface)
+		mu.Unlock()
 
 	case "remove-iface":
 		s := db[m.Iface]
 		if s == nil {
+			mu.Unlock()
 			return "", nil
 		}
 		for ip := range s.AppliedL3 {
-			runBin("ebpf", xdpBin, m.Iface, ip, "remove")
+			runBin(m.Iface, ip, "remove")
 		}
 		for f := range s.AppliedL7 {
 			runL7(f, "remove")
 		}
 		delete(db, m.Iface)
 		log.Printf("[daemon] removed iface %s", m.Iface)
+		mu.Unlock()
 
 	case "add-ip":
 		s := getOrCreate(m.Iface)
 		s.IPs[m.Val] = true
-		return "", syncIface(m.Iface, s)
+		syncIface(m.Iface, s)
+		mu.Unlock()
 
 	case "remove-ip":
 		s := db[m.Iface]
 		if s == nil {
+			mu.Unlock()
 			return "", nil
 		}
 		delete(s.IPs, m.Val)
-		return "", syncIface(m.Iface, s)
+		syncIface(m.Iface, s)
+		mu.Unlock()
 
 	case "add-web":
 		s := getOrCreate(m.Iface)
 		s.FQDNs[m.Val] = true
-		return "", syncIface(m.Iface, s)
+		syncIface(m.Iface, s)
+		mu.Unlock()
 
 	case "remove-web":
+		val := m.Val
 		s := db[m.Iface]
-		if s == nil {
-			return "", nil
+		if s != nil {
+			delete(s.FQDNs, val)
+			syncIface(m.Iface, s)
 		}
-		delete(s.FQDNs, m.Val)
-		return "", syncIface(m.Iface, s)
+		mu.Unlock()
+		runL7(val, "remove")
 
 	case "add-web-file":
 		lines, err := readLines(m.Val)
 		if err != nil {
+			mu.Unlock()
 			return "", err
 		}
 		log.Printf("[daemon] add-web-file: %d entries from %s", len(lines), m.Val)
@@ -304,22 +368,26 @@ func handle(m *pb.Request) (string, error) {
 		for _, l := range lines {
 			s.FQDNs[l] = true
 		}
-		return "", syncIface(m.Iface, s)
+		syncIface(m.Iface, s)
+		mu.Unlock()
 
 	case "remove-web-file":
 		s := db[m.Iface]
 		if s == nil {
+			mu.Unlock()
 			return "", nil
 		}
 		lines, err := readLines(m.Val)
 		if err != nil {
+			mu.Unlock()
 			return "", err
 		}
 		log.Printf("[daemon] remove-web-file: %d entries from %s", len(lines), m.Val)
 		for _, l := range lines {
 			delete(s.FQDNs, l)
 		}
-		return "", syncIface(m.Iface, s)
+		syncIface(m.Iface, s)
+		mu.Unlock()
 
 	case "status":
 		type ifaceStatus struct {
@@ -349,17 +417,17 @@ func handle(m *pb.Request) (string, error) {
 			result[iface] = st
 		}
 		b, _ := json.MarshalIndent(result, "", "  ")
+		mu.Unlock()
 		return string(b), nil
 
 	default:
+		mu.Unlock()
 		return "", fmt.Errorf("unknown cmd: %s", m.Cmd)
 	}
 	return "", nil
 }
 
-type server struct {
-	pb.UnimplementedAxonServer
-}
+type server struct{ pb.UnimplementedAxonServer }
 
 func (s *server) Exec(_ context.Context, req *pb.Request) (*pb.Response, error) {
 	data, err := handle(req)

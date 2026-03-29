@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 const LIST_FILE: &str = "/tmp/sinkhole-ctl.list";
+const PID_FILE: &str = "/tmp/sinkhole-ctl.pid";
 const SOCKET_PATH: &str = "/tmp/sinkhole-ctl.sock";
 
 fn write_list(list: &[String]) {
@@ -44,12 +45,23 @@ fn spawn_sinkhole(list: &[String]) -> Child {
     child
 }
 
-fn restart(child: &Arc<Mutex<Child>>, list: &[String]) {
-    let mut c = child.lock().unwrap();
-    let _ = c.kill();
-    let _ = c.wait();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    *c = spawn_sinkhole(list);
+fn reload_sinkhole() {
+    let pid_str = match fs::read_to_string(PID_FILE) {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => {
+            eprintln!("[ctl] cannot read pid file: {}", e);
+            return;
+        }
+    };
+    let status = Command::new("sudo")
+        .args(["kill", "-USR1", &pid_str])
+        .status();
+    match status {
+        Ok(s) if s.success() => eprintln!("[ctl] sent SIGUSR1 to pid {}", pid_str),
+        Ok(s) => eprintln!("[ctl] kill -USR1 {} exited {}", pid_str, s),
+        Err(e) => eprintln!("[ctl] kill -USR1 {} failed: {}", pid_str, e),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
 }
 
 fn run_supervisor(initial: Vec<String>) {
@@ -58,12 +70,14 @@ fn run_supervisor(initial: Vec<String>) {
     let list = Arc::new(Mutex::new(initial.clone()));
     let child = Arc::new(Mutex::new(spawn_sinkhole(&initial)));
 
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     let _ = fs::remove_file(SOCKET_PATH);
     let listener = UnixListener::bind(SOCKET_PATH).expect("failed to bind socket");
 
     for stream in listener.incoming().flatten() {
         let list = Arc::clone(&list);
-        let child = Arc::clone(&child);
+        let _child = Arc::clone(&child);
 
         let mut reader = BufReader::new(&stream);
         let mut writer = &stream;
@@ -81,9 +95,8 @@ fn run_supervisor(initial: Vec<String>) {
                     l.push(d.clone());
                 }
                 write_list(&l);
-                let new_list = l.clone();
                 drop(l);
-                restart(&child, &new_list);
+                reload_sinkhole();
                 format!("added: {}\n", d)
             }
             ["remove", domain] => {
@@ -91,9 +104,8 @@ fn run_supervisor(initial: Vec<String>) {
                 let mut l = list.lock().unwrap();
                 l.retain(|x| x != &d);
                 write_list(&l);
-                let new_list = l.clone();
                 drop(l);
-                restart(&child, &new_list);
+                reload_sinkhole();
                 format!("removed: {}\n", d)
             }
             ["file-add", path] => match fs::read_to_string(path) {
@@ -106,9 +118,8 @@ fn run_supervisor(initial: Vec<String>) {
                         }
                     }
                     write_list(&l);
-                    let new_list = l.clone();
                     drop(l);
-                    restart(&child, &new_list);
+                    reload_sinkhole();
                     format!("file-add done: {}\n", path)
                 }
                 Err(_) => format!("error: cannot read {}\n", path),
@@ -123,9 +134,8 @@ fn run_supervisor(initial: Vec<String>) {
                         .collect();
                     l.retain(|x| !to_remove.contains(x));
                     write_list(&l);
-                    let new_list = l.clone();
                     drop(l);
-                    restart(&child, &new_list);
+                    reload_sinkhole();
                     format!("file-remove done: {}\n", path)
                 }
                 Err(_) => format!("error: cannot read {}\n", path),
